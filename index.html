@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>TX-38 VTD + Precincts (Targeting)</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
+  <style>
+    body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    .panel {
+      position: absolute; z-index: 2; top: 12px; left: 12px;
+      background: #fff; padding: 10px 12px; border-radius: 10px;
+      box-shadow: 0 1px 10px rgba(0,0,0,0.18); font-size: 12px; min-width: 260px;
+    }
+    .panel label { font-weight: 700; display:block; margin: 8px 0 6px; }
+    .panel select, .panel input[type="range"] {
+      width: 100%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px;
+      font-size: 12px; background: #fff;
+    }
+    .row { display:flex; align-items:center; gap:8px; margin-top: 8px; }
+    .row input[type="checkbox"] { width: 14px; height: 14px; }
+    .legend { margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px; }
+    .legend-title { font-weight: 700; margin-bottom: 8px; }
+    .legend-item { display:flex; align-items:center; gap:8px; margin: 6px 0; }
+    .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.15); }
+    .legend-scale { display:flex; align-items:center; gap:8px; }
+    .bar {
+      flex: 1; height: 10px; border-radius: 6px; border: 1px solid rgba(0,0,0,0.12);
+      background: linear-gradient(to right, #f7fbff, #6baed6, #08306b);
+    }
+    .note { margin-top: 10px; color: #666; font-size: 11px; line-height: 1.25; }
+    .mapboxgl-popup { max-width: 320px; font: 12px/1.2 Arial, sans-serif; }
+    .popup-title { font-weight: 700; margin-bottom: 6px; }
+    .popup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top:8px; }
+    .kv b { font-weight: 700; }
+    .muted { color:#666; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <label for="metric">VTD color by</label>
+    <select id="metric">
+      <option value="majority_group" selected>Majority group</option>
+      <option value="div_index">Diversity index (Simpson)</option>
+      <option value="pop_balance">Population balance (S/M/L)</option>
+      <option value="pct_hispanic">% Hispanic</option>
+      <option value="pct_white">% White</option>
+      <option value="pct_black">% Black</option>
+      <option value="pct_asian">% Asian</option>
+      <option value="pct_other">% Other</option>
+    </select>
+
+    <div class="row">
+      <input type="checkbox" id="togglePrec" />
+      <label for="togglePrec" style="margin:0; font-weight:700;">Show precincts (from national)</label>
+    </div>
+
+    <label for="precMetric">Precinct color by</label>
+    <select id="precMetric" disabled>
+      <option value="none" selected>None (outlines only)</option>
+      <option value="target_voters">Target voters</option>
+      <option value="target_hh">Target households</option>
+      <option value="target_priority">Priority bucket</option>
+      <option value="has_target">Has targeting (yes/no)</option>
+    </select>
+
+    <label for="precOpacity">Precinct fill opacity</label>
+    <input type="range" id="precOpacity" min="0" max="1" step="0.05" value="0.35" disabled />
+
+    <div class="row">
+      <input type="checkbox" id="toggleFoot" checked />
+      <label for="toggleFoot" style="margin:0; font-weight:700;">Show layer footprints</label>
+    </div>
+
+    <div class="legend" id="legend"></div>
+
+    <div class="note">
+      Purpose: compare VTD vs Precinct <b>footprints</b> and internal boundaries. Precincts are selected by <i>intersects</i> against the VTD footprint (no clipping).
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    mapboxgl.accessToken = 'pk.eyJ1IjoiZGhhMTcwNSIsImEiOiJjbWpnaDl3ZzExMjR6M2dva2hhb3JuMzNtIn0.eHc9BU61g5K3CI_An0btog';
+
+    const map = new mapboxgl.Map({
+      container: 'map',
+      style: 'mapbox://styles/mapbox/light-v11',
+      center: [-95.55, 29.92],
+      zoom: 8.4
+    });
+
+    const safeNum = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const fmtPct100 = (v) => {
+      const n = safeNum(v);
+      if (n === null) return '—';
+      return n.toFixed(1) + '%';
+    };
+    const fmtInt = (v) => {
+      const n = safeNum(v);
+      if (n === null) return '—';
+      return Math.round(n).toLocaleString();
+    };
+    const fmtNum = (v, d=3) => {
+      const n = safeNum(v);
+      if (n === null) return '—';
+      return n.toFixed(d);
+    };
+
+    // VTD colors
+    const MAJ_COLOR = [
+      'match',
+      ['get', 'majority_group'],
+      'Hispanic', '#d73027',
+      'Anglo',    '#4575b4',
+      'Black',    '#313695',
+      'Asian',    '#74add1',
+      /* other */ '#cccccc'
+    ];
+    const POPBAL_COLOR = [
+      'match',
+      ['get', 'pop_balance'],
+      'Small',  '#fee08b',
+      'Medium', '#fdae61',
+      'Large',  '#d73027',
+      /* other */ '#cccccc'
+    ];
+    const SCALE_PCT_0_100 = (field) => ([
+      'interpolate',
+      ['linear'],
+      ['to-number', ['get', field]],
+      0,   '#f7fbff',
+      50,  '#6baed6',
+      100, '#08306b'
+    ]);
+    const SCALE_DIV = [
+      'interpolate',
+      ['linear'],
+      ['to-number', ['get', 'div_index']],
+      0.0, '#ffffe5',
+      0.5, '#78c679',
+      1.0, '#006837'
+    ];
+
+    // Precinct colors
+    const PREC_SCALE_VOTERS = [
+      'interpolate', ['linear'], ['to-number', ['get', 'target_voters']],
+      0, '#f7fbff',
+      800, '#6baed6',
+      2000, '#08306b'
+    ];
+    const PREC_SCALE_HH = [
+      'interpolate', ['linear'], ['to-number', ['get', 'target_hh']],
+      0, '#f7fbff',
+      600, '#6baed6',
+      1400, '#08306b'
+    ];
+    const PREC_PRIORITY = [
+      'match', ['get', 'target_priority'],
+      'High', '#08306b',
+      'Medium-High', '#2171b5',
+      'Medium-Low', '#6baed6',
+      'Low', '#c6dbef',
+      /* missing */ '#eeeeee'
+    ];
+    const PREC_HAS = [
+      'match', ['get', 'has_target'],
+      1, '#111827',
+      0, '#e5e7eb',
+      /* other */ '#e5e7eb'
+    ];
+
+    const legendEl = document.getElementById('legend');
+
+    const setLegendVTD = (mode) => {
+      if (mode === 'majority_group') {
+        legendEl.innerHTML = `
+          <div class="legend-title">VTD: Majority group</div>
+          <div class="legend-item"><span class="swatch" style="background:#d73027"></span> Majority Hispanic</div>
+          <div class="legend-item"><span class="swatch" style="background:#4575b4"></span> Majority White</div>
+          <div class="legend-item"><span class="swatch" style="background:#313695"></span> Majority Black</div>
+          <div class="legend-item"><span class="swatch" style="background:#74add1"></span> Majority Asian</div>
+          <div class="legend-item"><span class="swatch" style="background:#cccccc"></span> Other / Missing</div>
+        `;
+        return;
+      }
+      if (mode === 'pop_balance') {
+        legendEl.innerHTML = `
+          <div class="legend-title">VTD: Population balance</div>
+          <div class="legend-item"><span class="swatch" style="background:#fee08b"></span> Small</div>
+          <div class="legend-item"><span class="swatch" style="background:#fdae61"></span> Medium</div>
+          <div class="legend-item"><span class="swatch" style="background:#d73027"></span> Large</div>
+          <div class="legend-item"><span class="swatch" style="background:#cccccc"></span> Missing</div>
+        `;
+        return;
+      }
+      if (mode === 'div_index') {
+        legendEl.innerHTML = `
+          <div class="legend-title">VTD: Diversity index (Simpson)</div>
+          <div class="legend-scale"><span class="muted">0.0</span><div class="bar"></div><span class="muted">1.0</span></div>
+        `;
+        return;
+      }
+      // pct
+      legendEl.innerHTML = `
+        <div class="legend-title">VTD: ${mode}</div>
+        <div class="legend-scale"><span class="muted">0%</span><div class="bar"></div><span class="muted">100%</span></div>
+      `;
+    };
+
+    const appendLegendPrecinct = (mode) => {
+      if (mode === 'none') return;
+      const divider = '<div style="height:8px"></div><div style="border-top:1px solid #eee; margin-top:8px; padding-top:8px"></div>';
+      if (mode === 'target_priority') {
+        legendEl.innerHTML += divider + `
+          <div class="legend-title">Precincts: Priority</div>
+          <div class="legend-item"><span class="swatch" style="background:#08306b"></span> High</div>
+          <div class="legend-item"><span class="swatch" style="background:#2171b5"></span> Medium-High</div>
+          <div class="legend-item"><span class="swatch" style="background:#6baed6"></span> Medium-Low</div>
+          <div class="legend-item"><span class="swatch" style="background:#c6dbef"></span> Low</div>
+          <div class="legend-item"><span class="swatch" style="background:#eeeeee"></span> Missing</div>
+        `;
+        return;
+      }
+      if (mode === 'has_target') {
+        legendEl.innerHTML += divider + `
+          <div class="legend-title">Precincts: Has targeting</div>
+          <div class="legend-item"><span class="swatch" style="background:#111827"></span> Yes</div>
+          <div class="legend-item"><span class="swatch" style="background:#e5e7eb"></span> No</div>
+        `;
+        return;
+      }
+      const label = (mode === 'target_voters') ? 'Target voters' : 'Target households';
+      legendEl.innerHTML += divider + `
+        <div class="legend-title">Precincts: ${label}</div>
+        <div class="legend-scale"><span class="muted">Low</span><div class="bar"></div><span class="muted">High</span></div>
+      `;
+    };
+
+    map.on('load', () => {
+      map.addSource('vtds', { type:'geojson', data:'tx38_vtd_map.geojson' });
+      map.addSource('precincts', { type:'geojson', data:'tx38_precincts_from_national_targeting.geojson' });
+      map.addSource('vtd_fp', { type:'geojson', data:'tx38_vtd_footprint.geojson' });
+      map.addSource('prec_fp', { type:'geojson', data:'tx38_precincts_footprint.geojson' });
+
+      // VTD fill
+      map.addLayer({
+        id:'vtd-fill', type:'fill', source:'vtds',
+        paint: { 'fill-color': MAJ_COLOR, 'fill-opacity': 0.65 }
+      });
+
+      // VTD outline (dashed)
+      map.addLayer({
+        id:'vtd-outline', type:'line', source:'vtds',
+        paint: {
+          'line-color':'#6b7280',
+          'line-width':1.2,
+          'line-opacity':0.85,
+          'line-dasharray':[2,2]
+        }
+      });
+
+      // Precinct fill (starts hidden)
+      map.addLayer({
+        id:'precinct-fill', type:'fill', source:'precincts',
+        layout: { visibility:'none' },
+        paint: { 'fill-color': PREC_PRIORITY, 'fill-opacity': 0.35 }
+      });
+
+      // Precinct halo + outline
+      map.addLayer({
+        id:'precinct-outline-halo', type:'line', source:'precincts',
+        layout: { visibility:'none' },
+        paint: { 'line-color':'#ffffff', 'line-width':4.0, 'line-opacity':0.95 }
+      });
+      map.addLayer({
+        id:'precinct-outline', type:'line', source:'precincts',
+        layout: { visibility:'none' },
+        paint: { 'line-color':'#111827', 'line-width':1.6, 'line-opacity':0.95 }
+      });
+
+      // Footprints (ON by default)
+      map.addLayer({
+        id:'vtd-footprint', type:'line', source:'vtd_fp',
+        paint: { 'line-color':'#1d4ed8', 'line-width':2.2, 'line-opacity':0.9, 'line-dasharray':[3,2] }
+      });
+      map.addLayer({
+        id:'prec-footprint', type:'line', source:'prec_fp',
+        paint: { 'line-color':'#dc2626', 'line-width':2.4, 'line-opacity':0.9 }
+      });
+
+      // Tooltip: VTD hover
+      const popup = new mapboxgl.Popup({ closeButton:false, closeOnClick:false });
+      map.on('mousemove', 'vtd-fill', (e) => {
+        const f = e.features && e.features[0];
+        if (!f) return;
+        const p = f.properties || {};
+        const vtdId = p.CNTYVTD ?? p.cntyvtd ?? '—';
+        const majDisplay = (p.majority_group === 'Anglo') ? 'White' : (p.majority_group ?? '—');
+        const html = `
+          <div>
+            <div class="popup-title">VTD ${vtdId}</div>
+            <div class="kv"><b>Majority group:</b> ${majDisplay}</div>
+            <div class="kv"><b>Population balance:</b> ${p.pop_balance ?? '—'}</div>
+            <div class="kv"><b>Diversity (Simpson):</b> ${fmtNum(p.div_index,3)}</div>
+            <div class="popup-grid">
+              <div class="kv"><b>% Hispanic:</b> ${fmtPct100(p.pct_hispanic)}</div>
+              <div class="kv"><b>% White:</b> ${fmtPct100(p.pct_white)}</div>
+              <div class="kv"><b>% Black:</b> ${fmtPct100(p.pct_black)}</div>
+              <div class="kv"><b>% Asian:</b> ${fmtPct100(p.pct_asian)}</div>
+              <div class="kv"><b>% Other:</b> ${fmtPct100(p.pct_other)}</div>
+            </div>
+          </div>
+        `;
+        popup.setLngLat(e.lngLat).setHTML(html).addTo(map);
+      });
+      map.on('mouseleave', 'vtd-fill', () => popup.remove());
+
+      // Precinct click popup
+      map.on('click', 'precinct-fill', (e) => {
+        const f = e.features && e.features[0];
+        if (!f) return;
+        const p = f.properties || {};
+        const html = `
+          <div>
+            <div class="popup-title">Precinct ${p.PREC ?? '—'}</div>
+            <div class="kv"><b>Has targeting:</b> ${(p.has_target ? 'Yes' : 'No')}</div>
+            <div class="popup-grid">
+              <div class="kv"><b>Target voters:</b> ${fmtInt(p.target_voters)}</div>
+              <div class="kv"><b>Target households:</b> ${fmtInt(p.target_hh)}</div>
+              <div class="kv"><b>Priority:</b> ${(p.target_priority ?? '—')}</div>
+              <div class="kv"><b>PCTKEY:</b> ${(p.PCTKEY ?? '—')}</div>
+            </div>
+          </div>
+        `;
+        new mapboxgl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
+      });
+
+      // Controls
+      const metricSelect = document.getElementById('metric');
+      const togglePrec = document.getElementById('togglePrec');
+      const precMetric = document.getElementById('precMetric');
+      const precOpacity = document.getElementById('precOpacity');
+      const toggleFoot = document.getElementById('toggleFoot');
+
+      const applyVTDMetric = (metric) => {
+        if (metric === 'majority_group') {
+          map.setPaintProperty('vtd-fill','fill-color', MAJ_COLOR);
+          setLegendVTD('majority_group');
+          return;
+        }
+        if (metric === 'pop_balance') {
+          map.setPaintProperty('vtd-fill','fill-color', POPBAL_COLOR);
+          setLegendVTD('pop_balance');
+          return;
+        }
+        if (metric === 'div_index') {
+          map.setPaintProperty('vtd-fill','fill-color', SCALE_DIV);
+          setLegendVTD('div_index');
+          return;
+        }
+        map.setPaintProperty('vtd-fill','fill-color', SCALE_PCT_0_100(metric));
+        setLegendVTD(metric);
+      };
+
+      const applyPrecMetric = (metric) => {
+        if (metric === 'none') { map.setPaintProperty('precinct-fill','fill-color', '#ffffff'); return; }
+        if (metric === 'target_voters') { map.setPaintProperty('precinct-fill','fill-color', PREC_SCALE_VOTERS); return; }
+        if (metric === 'target_hh') { map.setPaintProperty('precinct-fill','fill-color', PREC_SCALE_HH); return; }
+        if (metric === 'target_priority') { map.setPaintProperty('precinct-fill','fill-color', PREC_PRIORITY); return; }
+        if (metric === 'has_target') { map.setPaintProperty('precinct-fill','fill-color', PREC_HAS); return; }
+      };
+
+      const setPrecVisibility = (on) => {
+        const vis = on ? 'visible' : 'none';
+        map.setLayoutProperty('precinct-fill','visibility', vis);
+        map.setLayoutProperty('precinct-outline-halo','visibility', vis);
+        map.setLayoutProperty('precinct-outline','visibility', vis);
+        map.setPaintProperty('vtd-fill','fill-opacity', on ? 0.35 : 0.65);
+        precMetric.disabled = !on;
+        precOpacity.disabled = !on;
+      };
+
+      const setFootVisibility = (on) => {
+        const vis = on ? 'visible' : 'none';
+        map.setLayoutProperty('vtd-footprint','visibility', vis);
+        map.setLayoutProperty('prec-footprint','visibility', vis);
+      };
+
+      metricSelect.addEventListener('change', (ev) => {
+        applyVTDMetric(ev.target.value);
+        if (togglePrec.checked) appendLegendPrecinct(precMetric.value);
+      });
+
+      togglePrec.addEventListener('change', (ev) => {
+        setPrecVisibility(ev.target.checked);
+        applyVTDMetric(metricSelect.value);
+        if (ev.target.checked) appendLegendPrecinct(precMetric.value);
+      });
+
+      precMetric.addEventListener('change', (ev) => {
+        applyPrecMetric(ev.target.value);
+        applyVTDMetric(metricSelect.value);
+        appendLegendPrecinct(ev.target.value);
+      });
+
+      precOpacity.addEventListener('input', (ev) => {
+        map.setPaintProperty('precinct-fill','fill-opacity', Number(ev.target.value));
+      });
+
+      toggleFoot.addEventListener('change', (ev) => {
+        setFootVisibility(ev.target.checked);
+      });
+
+      // init
+      applyVTDMetric(metricSelect.value);
+      setPrecVisibility(false);
+      applyPrecMetric('target_priority');
+      setFootVisibility(true);
+    });
+  </script>
+</body>
+</html>

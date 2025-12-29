@@ -1,0 +1,2 @@
+CSV precincts that did NOT match any selected precinct (PREC) in the national precincts layer (after CD38 intersects filter):
+0143, 0282, 0511, 0709, 0803, 0893, 1056, 1133
